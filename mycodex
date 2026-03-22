@@ -125,45 +125,46 @@ MyCodex
 
 Usage:
   mycodex install [--shell bash|zsh] [--rc-file <path>]
-  mycodex login <account>
-  mycodex use <account>
+  mycodex login <name>
+  mycodex use <name>
   mycodex list
-  mycodex usage [--json] [account]
+  mycodex usage [--json] [name]
   mycodex current
-  mycodex default <account>
-  mycodex logout <account>
-  mycodex forget <account>
+  mycodex default <name>
+  mycodex logout <name>
+  mycodex forget <name>
   mycodex prune [--dry-run]
-  mycodex where <account>
+  mycodex where <name>
   mycodex help
 
 Commands:
   install            Install mycodex into ~/.local/bin and wire shell integration.
-  login <account>    Log into an account and store auth under its own CODEX_HOME.
-  use <account>      Select an account and mark it current without launching codex.
+  login <name>       Log into an account and store auth under its own CODEX_HOME.
+  use <name>         Select an account and mark it current without launching codex.
   list               Show saved accounts, email, and local paths.
   usage              Show saved accounts with email and 5h/week limits.
   current            Print the current account name.
-  default <account>  Set the fallback account used when no current account is selected.
-  logout <account>   Clear current/default pointer only; keep saved auth.
-  forget <account>   Remove saved auth; next use will require login again.
+  default <name>     Set the fallback account used when no current account is selected.
+  logout <name>      Clear current/default pointer only; keep saved auth.
+  forget <name>      Remove saved auth; next use will require login again.
   prune              Remove removable stub accounts with no saved auth.
-  where <account>    Print the account directory path.
+  where <name>       Print the account directory path.
   help               Show this help output.
 
 Examples:
   mycodex install
-  mycodex login work
-  mycodex use work
+  mycodex login <name>
+  mycodex use <name>
   codex -m gpt-5.4
-  mycodex default personal
+  mycodex default <name>
   mycodex usage
-  mycodex usage work --json
+  mycodex usage <name> --json
   mycodex prune --dry-run
-  mycodex logout work
-  mycodex forget work
+  mycodex logout <name>
+  mycodex forget <name>
 
 Notes:
+  <name> is any local label you choose, for example: work, personal, or client-a.
   logout is safe for fast account switching. It does not delete auth.json.
   forget is destructive. It deletes the saved login for that account.
   use only selects the current account. Run normal `codex` after that.
@@ -258,19 +259,19 @@ EOF2
   ui_kv "symlink" "$dest_dir/mycodex"
   ui_kv "shell_rc" "$target_rc"
   ui_note "Open a new terminal or run: source $target_rc"
-  ui_note "Then use: mycodex use <account>  and  codex"
+  ui_note "Then use: mycodex login <name>, mycodex use <name>, then codex"
 }
 
 usage_cmd_help() {
   cat <<'EOF2'
 Usage:
   mycodex usage
-  mycodex usage <account>
-  mycodex usage --json [account]
+  mycodex usage <name>
+  mycodex usage --json [name]
 
 Modes:
   mycodex usage            Show all accounts with plan, status, and 5h/week limits.
-  mycodex usage <account>  Show one account in detail, including reset times.
+  mycodex usage <name>     Show one account in detail, including reset times.
 
 What it shows:
   auth        Whether local auth.json exists for the account.
@@ -281,6 +282,7 @@ What it shows:
   retry_at    Next retry time parsed from the latest local usage-limit log entry.
 
 Notes:
+  <name> is any local label you choose, for example: work, personal, or client-a.
   This command is local-first. It does not call a live billing or usage API.
   Plan and status can be stale until tokens refresh or new log entries are written.
   Stub accounts without saved auth are hidden; use `mycodex prune --dry-run` to inspect them.

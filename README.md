@@ -18,19 +18,23 @@ The bootstrap installer will:
 ## Daily usage
 
 ```bash
-mycodex login work
-mycodex use work
+mycodex login <name>
+mycodex use <name>
 codex
 ```
+
+`<name>` is any local label you choose for that login, for example `work`, `personal`, or `client-a`.
 
 Useful commands:
 
 ```bash
 mycodex list
 mycodex usage
-mycodex usage work --json
-mycodex logout work
-mycodex forget work
+mycodex usage <name> --json
+mycodex default <name>
+mycodex logout <name>
+mycodex forget <name>
+mycodex where <name>
 mycodex prune --dry-run
 ```
 
