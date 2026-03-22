@@ -124,13 +124,14 @@ MyCodex
   Fast account switching for Codex CLI using isolated CODEX_HOME directories.
 
 Usage:
-  mycodex install [--shell bash|zsh] [--rc-file <path>]
   mycodex login <name>
   mycodex use <name>
   mycodex list
   mycodex usage [--json] [name]
   mycodex current
   mycodex default <name>
+  mycodex reinstall [--shell bash|zsh] [--rc-file <path>]
+  mycodex uninstall [--shell bash|zsh] [--rc-file <path>]
   mycodex logout <name>
   mycodex forget <name>
   mycodex prune [--dry-run]
@@ -138,13 +139,14 @@ Usage:
   mycodex help
 
 Commands:
-  install            Install mycodex into ~/.local/bin and wire shell integration.
   login <name>       Log into an account and store auth under its own CODEX_HOME.
   use <name>         Select an account and mark it current without launching codex.
   list               Show saved accounts, email, and local paths.
   usage              Show saved accounts with email and 5h/week limits.
   current            Print the current account name.
   default <name>     Set the fallback account used when no current account is selected.
+  reinstall          Re-wire ~/.local/bin and shell integration for the current mycodex copy.
+  uninstall          Remove mycodex symlink and shell integration; keep saved accounts.
   logout <name>      Clear current/default pointer only; keep saved auth.
   forget <name>      Remove saved auth; next use will require login again.
   prune              Remove removable stub accounts with no saved auth.
@@ -152,11 +154,12 @@ Commands:
   help               Show this help output.
 
 Examples:
-  mycodex install
   mycodex login <name>
   mycodex use <name>
   codex -m gpt-5.4
   mycodex default <name>
+  mycodex reinstall
+  mycodex uninstall
   mycodex usage
   mycodex usage <name> --json
   mycodex prune --dry-run
@@ -165,6 +168,8 @@ Examples:
 
 Notes:
   <name> is any local label you choose, for example: work, personal, or client-a.
+  reinstall only re-applies local setup for the current mycodex copy.
+  uninstall keeps ~/.mycodex/accounts so you do not lose saved account data.
   logout is safe for fast account switching. It does not delete auth.json.
   forget is destructive. It deletes the saved login for that account.
   use only selects the current account. Run normal `codex` after that.
@@ -183,7 +188,42 @@ resolve_path() {
   printf '%s\n' "$path"
 }
 
-cmd_install() {
+default_shell_rc() {
+  local shell_name="${1:-bash}"
+
+  if [[ "$shell_name" == "zsh" ]]; then
+    printf '%s\n' "$HOME/.zshrc"
+  else
+    printf '%s\n' "$HOME/.bashrc"
+  fi
+}
+
+remove_shell_integration_lines() {
+  local target_rc="$1"
+
+  sed -i '\|^source ~/.mycodex/mycodex\.sh$|d' "$target_rc"
+  sed -i '\|^\[ -f "\$HOME/\.local/bin/mycodex" \] && source "\$HOME/\.local/bin/mycodex"$|d' "$target_rc"
+}
+
+install_cmd_help() {
+  local command_name="$1"
+
+  cat <<EOF2
+Usage:
+  mycodex $command_name
+  mycodex $command_name --shell bash
+  mycodex $command_name --rc-file /path/to/rc
+
+What it does:
+  - symlink mycodex into ~/.local/bin
+  - ensure ~/.local/bin is in PATH
+  - source mycodex from the chosen shell rc file for codex account switching
+EOF2
+}
+
+cmd_install_like() {
+  local command_name="$1"
+  shift
   local shell_name target_rc
   local dest_dir="$HOME/.local/bin"
   local src
@@ -213,21 +253,11 @@ cmd_install() {
         shift
         ;;
       -h|--help)
-        cat <<'EOF2'
-Usage:
-  mycodex install
-  mycodex install --shell bash
-  mycodex install --rc-file /path/to/rc
-
-What it does:
-  - symlink mycodex into ~/.local/bin
-  - ensure ~/.local/bin is in PATH
-  - source mycodex from the chosen shell rc file for codex account switching
-EOF2
+        install_cmd_help "$command_name"
         return
         ;;
       *)
-        ui_error "unknown flag for install: $1"
+        ui_error "unknown flag for $command_name: $1"
         exit 1
         ;;
     esac
@@ -235,11 +265,7 @@ EOF2
   done
 
   if [[ -z "$target_rc" ]]; then
-    if [[ "$shell_name" == "zsh" ]]; then
-      target_rc="$HOME/.zshrc"
-    else
-      target_rc="$HOME/.bashrc"
-    fi
+    target_rc="$(default_shell_rc "$shell_name")"
   fi
 
   mkdir -p "$dest_dir"
@@ -250,16 +276,117 @@ EOF2
   if ! grep -Fq "$add_path_line" "$target_rc"; then
     printf '\n%s\n' "$add_path_line" >> "$target_rc"
   fi
-  sed -i '\|^source ~/.mycodex/mycodex\.sh$|d' "$target_rc"
-  sed -i '\|^\[ -f "\$HOME/\.local/bin/mycodex" \] && source "\$HOME/\.local/bin/mycodex"$|d' "$target_rc"
+  remove_shell_integration_lines "$target_rc"
   printf '%s\n' "$source_line" >> "$target_rc"
 
-  ui_section "Install"
+  if [[ "$command_name" == "reinstall" ]]; then
+    ui_section "Reinstall"
+  else
+    ui_section "Install"
+  fi
   ui_kv "source" "$src"
   ui_kv "symlink" "$dest_dir/mycodex"
   ui_kv "shell_rc" "$target_rc"
   ui_note "Open a new terminal or run: source $target_rc"
   ui_note "Then use: mycodex login <name>, mycodex use <name>, then codex"
+}
+
+cmd_install() {
+  cmd_install_like "install" "$@"
+}
+
+cmd_reinstall() {
+  cmd_install_like "reinstall" "$@"
+}
+
+cmd_uninstall() {
+  local shell_name target_rc
+  local dest="$HOME/.local/bin/mycodex"
+  local src
+  local source_line='[ -f "$HOME/.local/bin/mycodex" ] && source "$HOME/.local/bin/mycodex"'
+  local removed_shell_line=0
+
+  shell_name="$(basename "${SHELL:-bash}")"
+  target_rc=""
+  src="$(resolve_path "$MYCODEX_SOURCE_PATH")"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --shell)
+        if [[ $# -lt 2 ]]; then
+          ui_error "missing value for --shell"
+          exit 1
+        fi
+        shell_name="${2:-}"
+        shift
+        ;;
+      --rc-file)
+        if [[ $# -lt 2 ]]; then
+          ui_error "missing value for --rc-file"
+          exit 1
+        fi
+        target_rc="${2:-}"
+        shift
+        ;;
+      -h|--help)
+        cat <<'EOF2'
+Usage:
+  mycodex uninstall
+  mycodex uninstall --shell bash
+  mycodex uninstall --rc-file /path/to/rc
+
+What it does:
+  - remove ~/.local/bin/mycodex
+  - remove the mycodex shell integration line from the chosen shell rc file
+  - keep ~/.mycodex/accounts and saved auth data
+EOF2
+        return
+        ;;
+      *)
+        ui_error "unknown flag for uninstall: $1"
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -z "$target_rc" ]]; then
+    target_rc="$(default_shell_rc "$shell_name")"
+  fi
+
+  ui_section "Uninstall"
+
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    rm -f "$dest"
+    ui_kv "removed" "$dest"
+  else
+    ui_note "No installed mycodex symlink found at $dest"
+  fi
+
+  if [[ -f "$target_rc" ]]; then
+    if grep -Fq "$source_line" "$target_rc" || grep -Fq 'source ~/.mycodex/mycodex.sh' "$target_rc"; then
+      remove_shell_integration_lines "$target_rc"
+      removed_shell_line=1
+    fi
+    if [[ "$removed_shell_line" -eq 1 ]]; then
+      ui_kv "shell_rc" "$target_rc"
+      ui_note "Removed mycodex shell integration from $target_rc"
+    else
+      ui_note "No mycodex shell integration line found in $target_rc"
+    fi
+  else
+    ui_note "Shell rc file not found: $target_rc"
+  fi
+
+  if [[ "$src" == "$HOME/.local/share/mycodex/"* ]] && [[ -f "$src" ]]; then
+    rm -f "$src"
+    ui_kv "removed" "$src"
+    rmdir "$(dirname "$src")" 2>/dev/null || true
+  fi
+
+  ui_note "Saved accounts under $BASE_DIR were kept."
+  ui_note "~/.local/bin is still left in PATH in case other tools use it."
+  ui_note "Open a new terminal or run: source $target_rc"
 }
 
 usage_cmd_help() {
@@ -1164,6 +1291,14 @@ main() {
     default)
       shift
       cmd_default "${1:-}"
+      ;;
+    reinstall)
+      shift
+      cmd_reinstall "$@"
+      ;;
+    uninstall)
+      shift
+      cmd_uninstall "$@"
       ;;
     logout)
       shift
