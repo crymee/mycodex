@@ -32,7 +32,6 @@ mycodex list
 mycodex usage
 mycodex usage <name> --json
 mycodex default <name>
-mycodex reinstall
 mycodex uninstall
 mycodex logout <name>
 mycodex forget <name>
@@ -43,8 +42,7 @@ mycodex prune --dry-run
 ## Notes
 
 - `use` only selects the current account. It does not launch `codex`.
-- `reinstall` re-applies the local symlink and shell integration for the current copy.
-- `uninstall` removes the local symlink and shell integration, but keeps `~/.mycodex/accounts`.
+- `uninstall` is destructive: it removes the local symlink, shell integration, and `~/.mycodex/accounts`.
 - `logout` only clears current/default pointers and keeps saved auth.
 - `forget` removes saved auth for an account.
 - `list` and `usage` hide stub accounts without saved auth.

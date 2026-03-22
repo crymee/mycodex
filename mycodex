@@ -130,7 +130,6 @@ Usage:
   mycodex usage [--json] [name]
   mycodex current
   mycodex default <name>
-  mycodex reinstall [--shell bash|zsh] [--rc-file <path>]
   mycodex uninstall [--shell bash|zsh] [--rc-file <path>]
   mycodex logout <name>
   mycodex forget <name>
@@ -145,8 +144,7 @@ Commands:
   usage              Show saved accounts with email and 5h/week limits.
   current            Print the current account name.
   default <name>     Set the fallback account used when no current account is selected.
-  reinstall          Re-wire ~/.local/bin and shell integration for the current mycodex copy.
-  uninstall          Remove mycodex symlink and shell integration; keep saved accounts.
+  uninstall          Remove mycodex, shell integration, and all saved local account data.
   logout <name>      Clear current/default pointer only; keep saved auth.
   forget <name>      Remove saved auth; next use will require login again.
   prune              Remove removable stub accounts with no saved auth.
@@ -158,7 +156,6 @@ Examples:
   mycodex use <name>
   codex -m gpt-5.4
   mycodex default <name>
-  mycodex reinstall
   mycodex uninstall
   mycodex usage
   mycodex usage <name> --json
@@ -168,8 +165,7 @@ Examples:
 
 Notes:
   <name> is any local label you choose, for example: work, personal, or client-a.
-  reinstall only re-applies local setup for the current mycodex copy.
-  uninstall keeps ~/.mycodex/accounts so you do not lose saved account data.
+  uninstall is destructive. It deletes saved auth and local account data under ~/.mycodex/accounts.
   logout is safe for fast account switching. It does not delete auth.json.
   forget is destructive. It deletes the saved login for that account.
   use only selects the current account. Run normal `codex` after that.
@@ -279,11 +275,7 @@ cmd_install_like() {
   remove_shell_integration_lines "$target_rc"
   printf '%s\n' "$source_line" >> "$target_rc"
 
-  if [[ "$command_name" == "reinstall" ]]; then
-    ui_section "Reinstall"
-  else
-    ui_section "Install"
-  fi
+  ui_section "Install"
   ui_kv "source" "$src"
   ui_kv "symlink" "$dest_dir/mycodex"
   ui_kv "shell_rc" "$target_rc"
@@ -293,10 +285,6 @@ cmd_install_like() {
 
 cmd_install() {
   cmd_install_like "install" "$@"
-}
-
-cmd_reinstall() {
-  cmd_install_like "reinstall" "$@"
 }
 
 cmd_uninstall() {
@@ -338,7 +326,7 @@ Usage:
 What it does:
   - remove ~/.local/bin/mycodex
   - remove the mycodex shell integration line from the chosen shell rc file
-  - keep ~/.mycodex/accounts and saved auth data
+  - remove ~/.mycodex/accounts and saved auth data
 EOF2
         return
         ;;
@@ -384,7 +372,18 @@ EOF2
     rmdir "$(dirname "$src")" 2>/dev/null || true
   fi
 
-  ui_note "Saved accounts under $BASE_DIR were kept."
+  if [[ -d "$BASE_DIR" ]]; then
+    rm -rf "$BASE_DIR"
+    ui_kv "removed" "$BASE_DIR"
+  else
+    ui_note "No saved account data found under $BASE_DIR"
+  fi
+
+  if [[ "$BASE_DIR" == "$HOME/.mycodex/accounts" ]]; then
+    rmdir "$HOME/.mycodex" 2>/dev/null || true
+  fi
+
+  ui_note "Saved auth and local account data were removed."
   ui_note "~/.local/bin is still left in PATH in case other tools use it."
   ui_note "Open a new terminal or run: source $target_rc"
 }
@@ -1291,10 +1290,6 @@ main() {
     default)
       shift
       cmd_default "${1:-}"
-      ;;
-    reinstall)
-      shift
-      cmd_reinstall "$@"
       ;;
     uninstall)
       shift
