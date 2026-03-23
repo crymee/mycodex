@@ -126,6 +126,7 @@ mycodex usage --json <name>
 - `usage --json` is for scripting
 
 `usage` is local-first. It does not call a live billing API. It infers data from saved auth, local session telemetry, and Codex logs.
+Text output formats times in your local time zone for readability. `--json` keeps raw timestamps for scripts.
 
 ### Removing state
 
@@ -138,7 +139,7 @@ mycodex uninstall
 ```
 
 - `logout <name>` is safe for switching; it only clears current/default pointers and keeps saved auth
-- `forget <name>` removes the saved auth for one account
+- `forget <name>` removes the saved auth for one account and auto-switches current/default first if that account is active and another saved account exists
 - `prune` removes stub account folders that do not have saved auth
 - `uninstall` is destructive and removes:
   - the local `mycodex` symlink

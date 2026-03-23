@@ -8,6 +8,10 @@ fi
 
 BASE_DIR="${MYCODEX_BASE_DIR:-$HOME/.mycodex/accounts}"
 BIN_NAME="mycodex"
+PARSED_SHELL_NAME=""
+PARSED_TARGET_RC=""
+SCANNED_ACCOUNTS=()
+SCANNED_HIDDEN_STUB_COUNT=0
 
 BOLD=""
 DIM=""
@@ -146,7 +150,7 @@ Commands:
   default <name>     Set the fallback account used when no current account is selected.
   uninstall          Remove mycodex, shell integration, and all saved local account data.
   logout <name>      Clear current/default pointer only; keep saved auth.
-  forget <name>      Remove saved auth; next use will require login again.
+  forget <name>      Remove saved auth; if active, auto-switch markers first when possible.
   prune              Remove removable stub accounts with no saved auth.
   where <name>       Print the account directory path.
   help               Show this help output.
@@ -168,6 +172,7 @@ Notes:
   uninstall is destructive. It deletes saved auth and local account data under ~/.mycodex/accounts.
   logout is safe for fast account switching. It does not delete auth.json.
   forget is destructive. It deletes the saved login for that account.
+  if the forgotten account is current/default, mycodex auto-switches those markers first when it can.
   use only selects the current account. Run normal `codex` after that.
   list and usage hide stub accounts without saved auth.
   usage is local-first and inferred from saved auth.json plus codex-tui.log.
@@ -217,107 +222,8 @@ What it does:
 EOF2
 }
 
-cmd_install_like() {
-  local command_name="$1"
-  shift
-  local shell_name target_rc
-  local dest_dir="$HOME/.local/bin"
-  local src
-  local add_path_line='export PATH="$HOME/.local/bin:$PATH"'
-  local source_line='[ -f "$HOME/.local/bin/mycodex" ] && source "$HOME/.local/bin/mycodex"'
-
-  shell_name="$(basename "${SHELL:-bash}")"
-  target_rc=""
-  src="$(resolve_path "$MYCODEX_SOURCE_PATH")"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --shell)
-        if [[ $# -lt 2 ]]; then
-          ui_error "missing value for --shell"
-          exit 1
-        fi
-        shell_name="${2:-}"
-        shift
-        ;;
-      --rc-file)
-        if [[ $# -lt 2 ]]; then
-          ui_error "missing value for --rc-file"
-          exit 1
-        fi
-        target_rc="${2:-}"
-        shift
-        ;;
-      -h|--help)
-        install_cmd_help "$command_name"
-        return
-        ;;
-      *)
-        ui_error "unknown flag for $command_name: $1"
-        exit 1
-        ;;
-    esac
-    shift
-  done
-
-  if [[ -z "$target_rc" ]]; then
-    target_rc="$(default_shell_rc "$shell_name")"
-  fi
-
-  mkdir -p "$dest_dir"
-  chmod +x "$src"
-  ln -sfn "$src" "$dest_dir/mycodex"
-
-  touch "$target_rc"
-  if ! grep -Fq "$add_path_line" "$target_rc"; then
-    printf '\n%s\n' "$add_path_line" >> "$target_rc"
-  fi
-  remove_shell_integration_lines "$target_rc"
-  printf '%s\n' "$source_line" >> "$target_rc"
-
-  ui_section "Install"
-  ui_kv "source" "$src"
-  ui_kv "symlink" "$dest_dir/mycodex"
-  ui_kv "shell_rc" "$target_rc"
-  ui_note "Open a new terminal or run: source $target_rc"
-  ui_note "Then use: mycodex login <name>, mycodex use <name>, then codex"
-}
-
-cmd_install() {
-  cmd_install_like "install" "$@"
-}
-
-cmd_uninstall() {
-  local shell_name target_rc
-  local dest="$HOME/.local/bin/mycodex"
-  local src
-  local source_line='[ -f "$HOME/.local/bin/mycodex" ] && source "$HOME/.local/bin/mycodex"'
-  local removed_shell_line=0
-
-  shell_name="$(basename "${SHELL:-bash}")"
-  target_rc=""
-  src="$(resolve_path "$MYCODEX_SOURCE_PATH")"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --shell)
-        if [[ $# -lt 2 ]]; then
-          ui_error "missing value for --shell"
-          exit 1
-        fi
-        shell_name="${2:-}"
-        shift
-        ;;
-      --rc-file)
-        if [[ $# -lt 2 ]]; then
-          ui_error "missing value for --rc-file"
-          exit 1
-        fi
-        target_rc="${2:-}"
-        shift
-        ;;
-      -h|--help)
-        cat <<'EOF2'
+uninstall_cmd_help() {
+  cat <<'EOF2'
 Usage:
   mycodex uninstall
   mycodex uninstall --shell bash
@@ -328,50 +234,102 @@ What it does:
   - remove the mycodex shell integration line from the chosen shell rc file
   - remove ~/.mycodex/accounts and saved auth data
 EOF2
-        return
+}
+
+parse_shell_rc_args() {
+  local command_name="$1"
+  local help_kind="$2"
+  shift 2
+
+  PARSED_SHELL_NAME="$(basename "${SHELL:-bash}")"
+  PARSED_TARGET_RC=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --shell)
+        if [[ $# -lt 2 ]]; then
+          ui_error "missing value for --shell"
+          exit 1
+        fi
+        PARSED_SHELL_NAME="${2:-}"
+        shift
+        ;;
+      --rc-file)
+        if [[ $# -lt 2 ]]; then
+          ui_error "missing value for --rc-file"
+          exit 1
+        fi
+        PARSED_TARGET_RC="${2:-}"
+        shift
+        ;;
+      -h|--help)
+        if [[ "$help_kind" == "install" ]]; then
+          install_cmd_help "$command_name"
+        else
+          uninstall_cmd_help
+        fi
+        return 1
         ;;
       *)
-        ui_error "unknown flag for uninstall: $1"
+        ui_error "unknown flag for $command_name: $1"
         exit 1
         ;;
     esac
     shift
   done
 
-  if [[ -z "$target_rc" ]]; then
-    target_rc="$(default_shell_rc "$shell_name")"
+  if [[ -z "$PARSED_TARGET_RC" ]]; then
+    PARSED_TARGET_RC="$(default_shell_rc "$PARSED_SHELL_NAME")"
   fi
+}
 
-  ui_section "Uninstall"
+ensure_local_bin_path_line() {
+  local target_rc="$1"
+  local add_path_line='export PATH="$HOME/.local/bin:$PATH"'
 
-  if [[ -e "$dest" || -L "$dest" ]]; then
-    rm -f "$dest"
-    ui_kv "removed" "$dest"
-  else
-    ui_note "No installed mycodex symlink found at $dest"
+  touch "$target_rc"
+  if ! grep -Fq "$add_path_line" "$target_rc"; then
+    printf '\n%s\n' "$add_path_line" >> "$target_rc"
   fi
+}
 
-  if [[ -f "$target_rc" ]]; then
-    if grep -Fq "$source_line" "$target_rc" || grep -Fq 'source ~/.mycodex/mycodex.sh' "$target_rc"; then
-      remove_shell_integration_lines "$target_rc"
-      removed_shell_line=1
-    fi
-    if [[ "$removed_shell_line" -eq 1 ]]; then
-      ui_kv "shell_rc" "$target_rc"
-      ui_note "Removed mycodex shell integration from $target_rc"
-    else
-      ui_note "No mycodex shell integration line found in $target_rc"
-    fi
-  else
+install_shell_integration_line() {
+  local target_rc="$1"
+  local source_line='[ -f "$HOME/.local/bin/mycodex" ] && source "$HOME/.local/bin/mycodex"'
+
+  remove_shell_integration_lines "$target_rc"
+  printf '%s\n' "$source_line" >> "$target_rc"
+}
+
+remove_shell_integration_if_present() {
+  local target_rc="$1"
+  local source_line='[ -f "$HOME/.local/bin/mycodex" ] && source "$HOME/.local/bin/mycodex"'
+
+  if [[ ! -f "$target_rc" ]]; then
     ui_note "Shell rc file not found: $target_rc"
+    return
   fi
+
+  if grep -Fq "$source_line" "$target_rc" || grep -Fq 'source ~/.mycodex/mycodex.sh' "$target_rc"; then
+    remove_shell_integration_lines "$target_rc"
+    ui_kv "shell_rc" "$target_rc"
+    ui_note "Removed mycodex shell integration from $target_rc"
+  else
+    ui_note "No mycodex shell integration line found in $target_rc"
+  fi
+}
+
+remove_managed_source_copy() {
+  local src="$1"
 
   if [[ "$src" == "$HOME/.local/share/mycodex/"* ]] && [[ -f "$src" ]]; then
     rm -f "$src"
     ui_kv "removed" "$src"
     rmdir "$(dirname "$src")" 2>/dev/null || true
   fi
+}
 
+remove_account_data_tree() {
   if [[ -d "$BASE_DIR" ]]; then
     rm -rf "$BASE_DIR"
     ui_kv "removed" "$BASE_DIR"
@@ -382,10 +340,65 @@ EOF2
   if [[ "$BASE_DIR" == "$HOME/.mycodex/accounts" ]]; then
     rmdir "$HOME/.mycodex" 2>/dev/null || true
   fi
+}
+
+cmd_install_like() {
+  local command_name="$1"
+  shift
+  local dest_dir="$HOME/.local/bin"
+  local src
+
+  if ! parse_shell_rc_args "$command_name" "install" "$@"; then
+    return
+  fi
+
+  src="$(resolve_path "$MYCODEX_SOURCE_PATH")"
+
+  mkdir -p "$dest_dir"
+  chmod +x "$src"
+  ln -sfn "$src" "$dest_dir/mycodex"
+
+  ensure_local_bin_path_line "$PARSED_TARGET_RC"
+  install_shell_integration_line "$PARSED_TARGET_RC"
+
+  ui_section "Install"
+  ui_kv "source" "$src"
+  ui_kv "symlink" "$dest_dir/mycodex"
+  ui_kv "shell_rc" "$PARSED_TARGET_RC"
+  ui_note "Open a new terminal or run: source $PARSED_TARGET_RC"
+  ui_note "Then use: mycodex login <name>, mycodex use <name>, then codex"
+}
+
+cmd_install() {
+  cmd_install_like "install" "$@"
+}
+
+cmd_uninstall() {
+  local dest="$HOME/.local/bin/mycodex"
+  local src
+
+  if ! parse_shell_rc_args "uninstall" "uninstall" "$@"; then
+    return
+  fi
+
+  src="$(resolve_path "$MYCODEX_SOURCE_PATH")"
+
+  ui_section "Uninstall"
+
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    rm -f "$dest"
+    ui_kv "removed" "$dest"
+  else
+    ui_note "No installed mycodex symlink found at $dest"
+  fi
+
+  remove_shell_integration_if_present "$PARSED_TARGET_RC"
+  remove_managed_source_copy "$src"
+  remove_account_data_tree
 
   ui_note "Saved auth and local account data were removed."
   ui_note "~/.local/bin is still left in PATH in case other tools use it."
-  ui_note "Open a new terminal or run: source $target_rc"
+  ui_note "Open a new terminal or run: source $PARSED_TARGET_RC"
 }
 
 usage_cmd_help() {
@@ -410,6 +423,7 @@ What it shows:
 Notes:
   <name> is any local label you choose, for example: work, personal, or client-a.
   This command is local-first. It does not call a live billing or usage API.
+  Text output shows times in your local time zone; `--json` keeps raw timestamps.
   Plan and status can be stale until tokens refresh or new log entries are written.
   Stub accounts without saved auth are hidden; use `mycodex prune --dry-run` to inspect them.
 EOF2
@@ -479,9 +493,91 @@ get_default() {
   fi
 }
 
+clear_current() {
+  rm -f "$BASE_DIR/.current"
+}
+
+clear_default() {
+  rm -f "$BASE_DIR/.default"
+}
+
+load_marker_state() {
+  MARKER_CURRENT="$(get_current || true)"
+  MARKER_DEFAULT="$(get_default || true)"
+}
+
 account_has_saved_auth() {
   local account="$1"
   [[ -f "$(account_dir "$account")/auth.json" ]]
+}
+
+collect_saved_accounts() {
+  local exclude_account="${1:-}"
+  local dir account
+
+  SCANNED_ACCOUNTS=()
+  SCANNED_HIDDEN_STUB_COUNT=0
+
+  shopt -s nullglob
+  for dir in "$BASE_DIR"/*; do
+    [[ -d "$dir" ]] || continue
+    account="$(basename "$dir")"
+    [[ "$account" == .* || "$account" == "$exclude_account" ]] && continue
+    if account_is_stub "$account"; then
+      SCANNED_HIDDEN_STUB_COUNT=$((SCANNED_HIDDEN_STUB_COUNT + 1))
+      continue
+    fi
+    SCANNED_ACCOUNTS+=("$account")
+  done
+  shopt -u nullglob
+}
+
+collect_prunable_accounts() {
+  local dir account
+
+  SCANNED_ACCOUNTS=()
+  shopt -s nullglob
+  for dir in "$BASE_DIR"/*; do
+    [[ -d "$dir" ]] || continue
+    account="$(basename "$dir")"
+    [[ "$account" == .* ]] && continue
+    if account_is_prunable "$account"; then
+      SCANNED_ACCOUNTS+=("$account")
+    fi
+  done
+  shopt -u nullglob
+}
+
+show_hidden_stub_note() {
+  local hidden_count="$1"
+
+  if [[ "$hidden_count" -gt 0 ]]; then
+    ui_note "Hidden $hidden_count stub account(s) without saved auth. Run '$BIN_NAME prune --dry-run' to inspect them."
+  fi
+
+  return 0
+}
+
+show_no_saved_accounts_message() {
+  local hidden_count="$1"
+
+  if [[ "$hidden_count" -gt 0 ]]; then
+    ui_warn "No saved accounts found under $BASE_DIR."
+    show_hidden_stub_note "$hidden_count"
+  else
+    ui_warn "No accounts found under $BASE_DIR."
+  fi
+}
+
+first_saved_replacement_account() {
+  local excluded_account="$1"
+
+  collect_saved_accounts "$excluded_account"
+  if [[ "${#SCANNED_ACCOUNTS[@]}" -gt 0 ]]; then
+    printf '%s\n' "${SCANNED_ACCOUNTS[0]}"
+  fi
+
+  return 0
 }
 
 account_is_stub() {
@@ -643,6 +739,57 @@ epoch_to_utc() {
   date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true
 }
 
+local_time_zone_label() {
+  local offset
+
+  offset="$(date '+%:z' 2>/dev/null || true)"
+  if [[ -n "$offset" ]]; then
+    printf 'UTC%s' "$offset"
+    return
+  fi
+
+  offset="$(date '+%z' 2>/dev/null || true)"
+  if [[ -n "$offset" ]]; then
+    printf 'UTC%s' "$offset"
+    return
+  fi
+
+  printf '%s' "local time"
+}
+
+format_datetime_local() {
+  local value="$1"
+  local style="${2:-detail}"
+  local fmt
+
+  if [[ -z "$value" ]]; then
+    return
+  fi
+
+  case "$style" in
+    table)
+      fmt='+%Y-%m-%d %H:%M'
+      ;;
+    *)
+      fmt='+%Y-%m-%d %H:%M:%S'
+      ;;
+  esac
+
+  date -d "$value" "$fmt" 2>/dev/null || printf '%s' "$value"
+}
+
+format_datetime_local_or_dash() {
+  local value="$1"
+  local style="${2:-detail}"
+
+  if [[ -z "$value" ]]; then
+    printf '%s' "-"
+    return
+  fi
+
+  format_datetime_local "$value" "$style"
+}
+
 percent_ge_100() {
   local value="${1:-}"
   local whole
@@ -697,104 +844,122 @@ usage_reset_record() {
   REC_ACCOUNT_ID=""
 }
 
-# Usage data is inferred locally from saved auth and the most recent CLI log entry.
-load_usage_record() {
-  local account="$1"
-  local current="$2"
-  local default="$3"
-  local dir auth_file id_token log_file line rate_line rate_plan
-  local primary_reset_epoch secondary_reset_epoch
+usage_record_apply_auth_file() {
+  local auth_file="$1"
+  local id_token
 
-  usage_reset_record
-  dir="$(account_dir "$account")"
+  if [[ ! -f "$auth_file" ]]; then
+    return
+  fi
 
-  REC_ACCOUNT="$account"
-  REC_PATH="$dir"
-  [[ "$account" == "$current" ]] && REC_CURRENT="yes"
-  [[ "$account" == "$default" ]] && REC_DEFAULT="yes"
+  REC_AUTH="saved"
+  REC_STATUS="ready"
+  REC_AUTH_MODE="$(json_get "$auth_file" '.auth_mode' 'auth_mode')"
+  REC_LAST_REFRESH="$(json_get "$auth_file" '.last_refresh' 'last_refresh')"
+  REC_ACCOUNT_ID="$(json_get "$auth_file" '.tokens.account_id' 'account_id')"
+  id_token="$(json_get "$auth_file" '.tokens.id_token' 'id_token')"
 
-  auth_file="$dir/auth.json"
-  if [[ -f "$auth_file" ]]; then
-    REC_AUTH="saved"
+  if [[ -z "$id_token" ]]; then
+    return
+  fi
+
+  REC_EMAIL="$(jwt_claim "$id_token" '.email')"
+  if [[ -z "$REC_EMAIL" ]]; then
+    REC_EMAIL="$(jwt_claim "$id_token" '.preferred_username')"
+  fi
+  REC_PLAN="$(jwt_claim "$id_token" '.["https://api.openai.com/auth"].chatgpt_plan_type')"
+  REC_PLAN_UNTIL="$(jwt_claim "$id_token" '.["https://api.openai.com/auth"].chatgpt_subscription_active_until')"
+  REC_PLAN_CHECKED_AT="$(jwt_claim "$id_token" '.["https://api.openai.com/auth"].chatgpt_subscription_last_checked')"
+
+  return 0
+}
+
+usage_limit_reason_from_line() {
+  local line="$1"
+
+  if [[ "$line" == *"send a request to your admin"* ]]; then
+    printf '%s\n' "contact_admin"
+  elif [[ "$line" == *"Upgrade to Pro"* ]] && [[ "$line" == *"purchase more credits"* ]]; then
+    printf '%s\n' "upgrade_or_purchase_credits"
+  elif [[ "$line" == *"Upgrade to Pro"* ]]; then
+    printf '%s\n' "upgrade_to_pro"
+  elif [[ "$line" == *"purchase more credits"* ]]; then
+    printf '%s\n' "purchase_credits"
+  else
+    printf '%s\n' "usage_limit"
+  fi
+}
+
+usage_record_apply_limit_log() {
+  local log_file="$1"
+  local line
+
+  if [[ ! -f "$log_file" ]]; then
+    return
+  fi
+
+  line="$(grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*codex_core::codex: Turn error: You've hit your usage limit\\." "$log_file" | tail -n 1 || true)"
+  if [[ -z "$line" ]]; then
+    return
+  fi
+
+  REC_LAST_LIMIT_AT="${line%%  INFO*}"
+  REC_RETRY_AT="$(printf '%s\n' "$line" | sed -n 's/.*try again at \(.*\)\./\1/p')"
+  REC_REASON="$(usage_limit_reason_from_line "$line")"
+
+  if [[ "$REC_AUTH" == "saved" ]]; then
+    if retry_is_future "$REC_RETRY_AT"; then
+      REC_STATUS="limited"
+    else
+      REC_STATUS="limit_seen"
+    fi
+  fi
+
+  return 0
+}
+
+usage_record_apply_rate_line() {
+  local rate_line="$1"
+  local primary_reset_epoch secondary_reset_epoch rate_plan
+
+  if [[ -z "$rate_line" ]] || ! command -v jq >/dev/null 2>&1; then
+    return
+  fi
+
+  REC_LIMITS_AT="$(printf '%s' "$rate_line" | jq -r '.timestamp // empty' 2>/dev/null || true)"
+  REC_PRIMARY_USED="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.primary.used_percent // empty' 2>/dev/null || true)"
+  REC_PRIMARY_WINDOW_MIN="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.primary.window_minutes // empty' 2>/dev/null || true)"
+  primary_reset_epoch="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.primary.resets_at // empty' 2>/dev/null || true)"
+  REC_PRIMARY_RESET_AT="$(epoch_to_utc "$primary_reset_epoch")"
+  REC_SECONDARY_USED="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.secondary.used_percent // empty' 2>/dev/null || true)"
+  REC_SECONDARY_WINDOW_MIN="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.secondary.window_minutes // empty' 2>/dev/null || true)"
+  secondary_reset_epoch="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.secondary.resets_at // empty' 2>/dev/null || true)"
+  REC_SECONDARY_RESET_AT="$(epoch_to_utc "$secondary_reset_epoch")"
+  rate_plan="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.plan_type // empty' 2>/dev/null || true)"
+
+  if [[ -n "$rate_plan" ]]; then
+    REC_PLAN="$rate_plan"
+  fi
+
+  if percent_ge_100 "$REC_SECONDARY_USED"; then
+    REC_STATUS="weekly_limited"
+    REC_REASON="weekly_limit"
+    [[ -z "$REC_RETRY_AT" ]] && REC_RETRY_AT="$REC_SECONDARY_RESET_AT"
+  elif percent_ge_100 "$REC_PRIMARY_USED"; then
+    REC_STATUS="session_limited"
+    REC_REASON="session_5h_limit"
+    [[ -z "$REC_RETRY_AT" ]] && REC_RETRY_AT="$REC_PRIMARY_RESET_AT"
+  elif [[ "$REC_AUTH" == "saved" ]] && [[ -n "$REC_PRIMARY_USED$REC_SECONDARY_USED" ]]; then
     REC_STATUS="ready"
-    REC_AUTH_MODE="$(json_get "$auth_file" '.auth_mode' 'auth_mode')"
-    REC_LAST_REFRESH="$(json_get "$auth_file" '.last_refresh' 'last_refresh')"
-    REC_ACCOUNT_ID="$(json_get "$auth_file" '.tokens.account_id' 'account_id')"
-    id_token="$(json_get "$auth_file" '.tokens.id_token' 'id_token')"
-
-    if [[ -n "$id_token" ]]; then
-      REC_EMAIL="$(jwt_claim "$id_token" '.email')"
-      if [[ -z "$REC_EMAIL" ]]; then
-        REC_EMAIL="$(jwt_claim "$id_token" '.preferred_username')"
-      fi
-      REC_PLAN="$(jwt_claim "$id_token" '.["https://api.openai.com/auth"].chatgpt_plan_type')"
-      REC_PLAN_UNTIL="$(jwt_claim "$id_token" '.["https://api.openai.com/auth"].chatgpt_subscription_active_until')"
-      REC_PLAN_CHECKED_AT="$(jwt_claim "$id_token" '.["https://api.openai.com/auth"].chatgpt_subscription_last_checked')"
-    fi
+    REC_REASON=""
+    REC_RETRY_AT=""
+    REC_LAST_LIMIT_AT=""
   fi
 
-  log_file="$dir/log/codex-tui.log"
-  if [[ -f "$log_file" ]]; then
-    line="$(grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*codex_core::codex: Turn error: You've hit your usage limit\\." "$log_file" | tail -n 1 || true)"
-    if [[ -n "$line" ]]; then
-      REC_LAST_LIMIT_AT="${line%%  INFO*}"
-      REC_RETRY_AT="$(printf '%s\n' "$line" | sed -n 's/.*try again at \(.*\)\./\1/p')"
+  return 0
+}
 
-      if [[ "$line" == *"send a request to your admin"* ]]; then
-        REC_REASON="contact_admin"
-      elif [[ "$line" == *"Upgrade to Pro"* ]] && [[ "$line" == *"purchase more credits"* ]]; then
-        REC_REASON="upgrade_or_purchase_credits"
-      elif [[ "$line" == *"Upgrade to Pro"* ]]; then
-        REC_REASON="upgrade_to_pro"
-      elif [[ "$line" == *"purchase more credits"* ]]; then
-        REC_REASON="purchase_credits"
-      else
-        REC_REASON="usage_limit"
-      fi
-
-      if [[ "$REC_AUTH" == "saved" ]]; then
-        if retry_is_future "$REC_RETRY_AT"; then
-          REC_STATUS="limited"
-        else
-          REC_STATUS="limit_seen"
-        fi
-      fi
-    fi
-  fi
-
-  rate_line="$(latest_token_count_line "$dir")"
-  if [[ -n "$rate_line" ]] && command -v jq >/dev/null 2>&1; then
-    REC_LIMITS_AT="$(printf '%s' "$rate_line" | jq -r '.timestamp // empty' 2>/dev/null || true)"
-    REC_PRIMARY_USED="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.primary.used_percent // empty' 2>/dev/null || true)"
-    REC_PRIMARY_WINDOW_MIN="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.primary.window_minutes // empty' 2>/dev/null || true)"
-    primary_reset_epoch="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.primary.resets_at // empty' 2>/dev/null || true)"
-    REC_PRIMARY_RESET_AT="$(epoch_to_utc "$primary_reset_epoch")"
-    REC_SECONDARY_USED="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.secondary.used_percent // empty' 2>/dev/null || true)"
-    REC_SECONDARY_WINDOW_MIN="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.secondary.window_minutes // empty' 2>/dev/null || true)"
-    secondary_reset_epoch="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.secondary.resets_at // empty' 2>/dev/null || true)"
-    REC_SECONDARY_RESET_AT="$(epoch_to_utc "$secondary_reset_epoch")"
-    rate_plan="$(printf '%s' "$rate_line" | jq -r '.payload.rate_limits.plan_type // empty' 2>/dev/null || true)"
-
-    if [[ -n "$rate_plan" ]]; then
-      REC_PLAN="$rate_plan"
-    fi
-
-    if percent_ge_100 "$REC_SECONDARY_USED"; then
-      REC_STATUS="weekly_limited"
-      REC_REASON="weekly_limit"
-      [[ -z "$REC_RETRY_AT" ]] && REC_RETRY_AT="$REC_SECONDARY_RESET_AT"
-    elif percent_ge_100 "$REC_PRIMARY_USED"; then
-      REC_STATUS="session_limited"
-      REC_REASON="session_5h_limit"
-      [[ -z "$REC_RETRY_AT" ]] && REC_RETRY_AT="$REC_PRIMARY_RESET_AT"
-    elif [[ "$REC_AUTH" == "saved" ]] && [[ -n "$REC_PRIMARY_USED$REC_SECONDARY_USED" ]]; then
-      REC_STATUS="ready"
-      REC_REASON=""
-      REC_RETRY_AT=""
-      REC_LAST_LIMIT_AT=""
-    fi
-  fi
-
+usage_record_finalize() {
   if [[ -z "$REC_AUTH_MODE" ]]; then
     REC_AUTH_MODE="unknown"
   fi
@@ -804,6 +969,29 @@ load_usage_record() {
   if [[ -z "$REC_STATUS" ]]; then
     REC_STATUS="unknown"
   fi
+
+  return 0
+}
+
+# Usage data is inferred locally from saved auth and the most recent CLI log entry.
+load_usage_record() {
+  local account="$1"
+  local current="$2"
+  local default="$3"
+  local dir
+
+  usage_reset_record
+  dir="$(account_dir "$account")"
+
+  REC_ACCOUNT="$account"
+  REC_PATH="$dir"
+  [[ "$account" == "$current" ]] && REC_CURRENT="yes"
+  [[ "$account" == "$default" ]] && REC_DEFAULT="yes"
+
+  usage_record_apply_auth_file "$dir/auth.json"
+  usage_record_apply_limit_log "$dir/log/codex-tui.log"
+  usage_record_apply_rate_line "$(latest_token_count_line "$dir")"
+  usage_record_finalize
 
   return 0
 }
@@ -875,27 +1063,27 @@ render_usage_record_detail() {
   ui_kv "plan" "$REC_PLAN"
   ui_kv "status" "$REC_STATUS"
   [[ -n "$REC_REASON" ]] && ui_kv "reason" "$REC_REASON"
-  [[ -n "$REC_RETRY_AT" ]] && ui_kv "retry_at" "$REC_RETRY_AT"
-  [[ -n "$REC_LAST_LIMIT_AT" ]] && ui_kv "last_limit" "$REC_LAST_LIMIT_AT"
-  [[ -n "$REC_LAST_REFRESH" ]] && ui_kv "last_refresh" "$REC_LAST_REFRESH"
-  [[ -n "$REC_LIMITS_AT" ]] && ui_kv "limits_at" "$REC_LIMITS_AT"
+  [[ -n "$REC_RETRY_AT" ]] && ui_kv "retry_at" "$(format_datetime_local "$REC_RETRY_AT")"
+  [[ -n "$REC_LAST_LIMIT_AT" ]] && ui_kv "last_limit" "$(format_datetime_local "$REC_LAST_LIMIT_AT")"
+  [[ -n "$REC_LAST_REFRESH" ]] && ui_kv "last_refresh" "$(format_datetime_local "$REC_LAST_REFRESH")"
+  [[ -n "$REC_LIMITS_AT" ]] && ui_kv "limits_at" "$(format_datetime_local "$REC_LIMITS_AT")"
   [[ -n "$REC_PRIMARY_USED" ]] && ui_kv "5h_used" "$(format_percent "$REC_PRIMARY_USED")"
-  [[ -n "$REC_PRIMARY_RESET_AT" ]] && ui_kv "5h_reset" "$REC_PRIMARY_RESET_AT"
+  [[ -n "$REC_PRIMARY_RESET_AT" ]] && ui_kv "5h_reset" "$(format_datetime_local "$REC_PRIMARY_RESET_AT")"
   [[ -n "$REC_SECONDARY_USED" ]] && ui_kv "week_used" "$(format_percent "$REC_SECONDARY_USED")"
-  [[ -n "$REC_SECONDARY_RESET_AT" ]] && ui_kv "week_reset" "$REC_SECONDARY_RESET_AT"
-  [[ -n "$REC_PLAN_UNTIL" ]] && ui_kv "plan_until" "$REC_PLAN_UNTIL"
-  [[ -n "$REC_PLAN_CHECKED_AT" ]] && ui_kv "plan_check" "$REC_PLAN_CHECKED_AT"
+  [[ -n "$REC_SECONDARY_RESET_AT" ]] && ui_kv "week_reset" "$(format_datetime_local "$REC_SECONDARY_RESET_AT")"
+  [[ -n "$REC_PLAN_UNTIL" ]] && ui_kv "plan_until" "$(format_datetime_local "$REC_PLAN_UNTIL")"
+  [[ -n "$REC_PLAN_CHECKED_AT" ]] && ui_kv "plan_check" "$(format_datetime_local "$REC_PLAN_CHECKED_AT")"
   [[ -n "$REC_ACCOUNT_ID" ]] && ui_kv "account_id" "$REC_ACCOUNT_ID"
   ui_kv "path" "$REC_PATH"
+  ui_note "Times in this view use local time ($(local_time_zone_label))."
   ui_note "This view is local-first and may lag behind live billing or usage state."
 }
 
 cmd_usage() {
   local output_format="text"
   local selected_account=""
-  local current default dir account
+  local dir account
   local -a accounts=()
-  local hidden_stub_count=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -921,8 +1109,7 @@ cmd_usage() {
     shift
   done
 
-  current="$(get_current || true)"
-  default="$(get_default || true)"
+  load_marker_state
 
   if [[ -n "$selected_account" ]]; then
     validate_account "$selected_account"
@@ -933,26 +1120,12 @@ cmd_usage() {
     fi
     accounts=("$selected_account")
   else
-    shopt -s nullglob
-    for dir in "$BASE_DIR"/*; do
-      [[ -d "$dir" ]] || continue
-      account="$(basename "$dir")"
-      [[ "$account" == .* ]] && continue
-      if account_is_stub "$account"; then
-        hidden_stub_count=$((hidden_stub_count + 1))
-        continue
-      fi
-      accounts+=("$account")
-    done
+    collect_saved_accounts
+    accounts=("${SCANNED_ACCOUNTS[@]}")
   fi
 
   if [[ "${#accounts[@]}" -eq 0 ]]; then
-    if [[ "$hidden_stub_count" -gt 0 ]]; then
-      ui_warn "No saved accounts found under $BASE_DIR."
-      ui_note "Hidden $hidden_stub_count stub account(s) without saved auth. Run '$BIN_NAME prune --dry-run' to inspect them."
-      return
-    fi
-    ui_warn "No accounts found under $BASE_DIR."
+    show_no_saved_accounts_message "$SCANNED_HIDDEN_STUB_COUNT"
     return
   fi
 
@@ -965,7 +1138,7 @@ cmd_usage() {
     printf '[\n'
     local first=1
     for account in "${accounts[@]}"; do
-      load_usage_record "$account" "$current" "$default"
+      load_usage_record "$account" "$MARKER_CURRENT" "$MARKER_DEFAULT"
       if [[ "$first" -eq 0 ]]; then
         printf ',\n'
       fi
@@ -977,16 +1150,16 @@ cmd_usage() {
   fi
 
   if [[ -n "$selected_account" ]]; then
-    load_usage_record "$selected_account" "$current" "$default"
+    load_usage_record "$selected_account" "$MARKER_CURRENT" "$MARKER_DEFAULT"
     render_usage_record_detail
     return
   fi
 
   ui_section "Usage Overview"
-  printf '%-16s %-30s %-8s %-8s %-16s %-8s %-9s %-20s %s\n' "ACCOUNT" "EMAIL" "CURRENT" "PLAN" "STATUS" "5H_USED" "WEEK_USED" "5H_RESET_AT" "WEEK_RESET_AT"
+  printf '%-16s %-30s %-8s %-8s %-16s %-8s %-9s %-16s %s\n' "ACCOUNT" "EMAIL" "CURRENT" "PLAN" "STATUS" "5H_USED" "WEEK_USED" "5H_RESET" "WEEK_RESET"
   for account in "${accounts[@]}"; do
-    load_usage_record "$account" "$current" "$default"
-    printf '%-16s %-30s %-8s %-8s %-16s %-8s %-9s %-20s %s\n' \
+    load_usage_record "$account" "$MARKER_CURRENT" "$MARKER_DEFAULT"
+    printf '%-16s %-30s %-8s %-8s %-16s %-8s %-9s %-16s %s\n' \
       "$REC_ACCOUNT" \
       "${REC_EMAIL:--}" \
       "$REC_CURRENT" \
@@ -994,13 +1167,12 @@ cmd_usage() {
       "$REC_STATUS" \
       "$(format_percent "$REC_PRIMARY_USED")" \
       "$(format_percent "$REC_SECONDARY_USED")" \
-      "${REC_PRIMARY_RESET_AT:--}" \
-      "${REC_SECONDARY_RESET_AT:--}"
+      "$(format_datetime_local_or_dash "$REC_PRIMARY_RESET_AT" table)" \
+      "$(format_datetime_local_or_dash "$REC_SECONDARY_RESET_AT" table)"
   done
+  ui_note "Reset times in text output use local time ($(local_time_zone_label)); --json keeps raw timestamps."
   ui_note "5h/week fields come from the latest local token_count event; status still falls back to auth and CLI logs when needed."
-  if [[ "$hidden_stub_count" -gt 0 ]]; then
-    ui_note "Hidden $hidden_stub_count stub account(s) without saved auth. Run '$BIN_NAME prune --dry-run' to inspect them."
-  fi
+  show_hidden_stub_note "$SCANNED_HIDDEN_STUB_COUNT"
 }
 
 cmd_login() {
@@ -1043,7 +1215,6 @@ cmd_use() {
 cmd_list() {
   mkdir -p "$BASE_DIR"
   local current default
-  local hidden_stub_count=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1065,22 +1236,16 @@ EOF2
     shift
   done
 
-  current="$(get_current || true)"
-  default="$(get_default || true)"
+  load_marker_state
+  current="$MARKER_CURRENT"
+  default="$MARKER_DEFAULT"
 
-  shopt -s nullglob
   local found=0
   ui_section "Accounts"
   printf '%-16s %-8s %-8s %-10s %-30s %s\n' "ACCOUNT" "CURRENT" "DEFAULT" "AUTH" "EMAIL" "PATH"
-  for dir in "$BASE_DIR"/*; do
-    [[ -d "$dir" ]] || continue
-    local name
-    name="$(basename "$dir")"
-    [[ "$name" == .* ]] && continue
-    if account_is_stub "$name"; then
-      hidden_stub_count=$((hidden_stub_count + 1))
-      continue
-    fi
+  local name
+  collect_saved_accounts
+  for name in "${SCANNED_ACCOUNTS[@]}"; do
     found=1
     load_usage_record "$name" "$current" "$default"
     printf '%-16s %-8s %-8s %-10s %-30s %s\n' \
@@ -1092,17 +1257,10 @@ EOF2
       "$REC_PATH"
   done
   if [[ "$found" -eq 0 ]]; then
-    if [[ "$hidden_stub_count" -gt 0 ]]; then
-      ui_warn "No saved accounts found under $BASE_DIR."
-      ui_note "Hidden $hidden_stub_count stub account(s) without saved auth. Run '$BIN_NAME prune --dry-run' to inspect them."
-      return
-    fi
-    ui_warn "No accounts found under $BASE_DIR."
+    show_no_saved_accounts_message "$SCANNED_HIDDEN_STUB_COUNT"
     return
   fi
-  if [[ "$hidden_stub_count" -gt 0 ]]; then
-    ui_note "Hidden $hidden_stub_count stub account(s) without saved auth. Run '$BIN_NAME prune --dry-run' to inspect them."
-  fi
+  show_hidden_stub_note "$SCANNED_HIDDEN_STUB_COUNT"
 }
 
 cmd_current() {
@@ -1126,9 +1284,8 @@ cmd_default() {
 
 cmd_prune() {
   local dry_run="no"
-  local current default dir account
+  local current default account
   local removed_count=0
-  local seen_count=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1154,36 +1311,29 @@ EOF2
     shift
   done
 
-  current="$(get_current || true)"
-  default="$(get_default || true)"
+  load_marker_state
+  current="$MARKER_CURRENT"
+  default="$MARKER_DEFAULT"
+  collect_prunable_accounts
 
-  shopt -s nullglob
-  for dir in "$BASE_DIR"/*; do
-    [[ -d "$dir" ]] || continue
-    account="$(basename "$dir")"
-    [[ "$account" == .* ]] && continue
-    if ! account_is_prunable "$account"; then
-      continue
-    fi
-
-    seen_count=$((seen_count + 1))
+  for account in "${SCANNED_ACCOUNTS[@]}"; do
     if [[ "$dry_run" == "yes" ]]; then
       printf 'would_prune  %s\n' "$account"
       continue
     fi
 
-    rm -rf "$dir"
+    rm -rf "$(account_dir "$account")"
     if [[ "$current" == "$account" ]]; then
-      rm -f "$BASE_DIR/.current"
+      clear_current
     fi
     if [[ "$default" == "$account" ]]; then
-      rm -f "$BASE_DIR/.default"
+      clear_default
     fi
     printf 'pruned       %s\n' "$account"
     removed_count=$((removed_count + 1))
   done
 
-  if [[ "$seen_count" -eq 0 ]]; then
+  if [[ "${#SCANNED_ACCOUNTS[@]}" -eq 0 ]]; then
     ui_note "No removable stub accounts found."
     return
   fi
@@ -1202,18 +1352,17 @@ EOF2
 cmd_logout() {
   local account="$1"
   validate_account "$account"
-  local current default changed
-  current="$(get_current || true)"
-  default="$(get_default || true)"
+  local changed
+  load_marker_state
   changed=0
 
-  if [[ "$current" == "$account" ]]; then
-    rm -f "$BASE_DIR/.current"
+  if [[ "$MARKER_CURRENT" == "$account" ]]; then
+    clear_current
     changed=1
   fi
 
-  if [[ "$default" == "$account" ]]; then
-    rm -f "$BASE_DIR/.default"
+  if [[ "$MARKER_DEFAULT" == "$account" ]]; then
+    clear_default
     changed=1
   fi
 
@@ -1227,30 +1376,50 @@ cmd_logout() {
 }
 
 # "forget" is the destructive counterpart to cmd_logout().
-# It deletes the saved auth for an account and clears related pointers.
+# It deletes the saved auth for an account. If that account is still active,
+# automatically switch current/default markers to another saved account first when possible.
 cmd_forget() {
   local account="$1"
+  local dir removed_marker selected_replacement
+
   validate_account "$account"
-  local dir current default removed_marker
   dir="$(account_dir "$account")"
-  current="$(get_current || true)"
-  default="$(get_default || true)"
+  load_marker_state
   removed_marker=0
+  selected_replacement=""
+
+  if [[ "$MARKER_CURRENT" == "$account" || "$MARKER_DEFAULT" == "$account" ]]; then
+    selected_replacement="$(first_saved_replacement_account "$account")"
+    if [[ -z "$selected_replacement" ]]; then
+      ui_note "Account '$account' is active and no other saved account is available as a replacement."
+      ui_note "Current/default pointers will be cleared after forget."
+    fi
+  fi
 
   rm -f "$dir/auth.json"
 
-  if [[ "$current" == "$account" ]]; then
-    rm -f "$BASE_DIR/.current"
+  if [[ "$MARKER_CURRENT" == "$account" ]]; then
+    if [[ -n "$selected_replacement" ]]; then
+      set_current "$selected_replacement"
+    else
+      clear_current
+    fi
     removed_marker=1
   fi
 
-  if [[ "$default" == "$account" ]]; then
-    rm -f "$BASE_DIR/.default"
+  if [[ "$MARKER_DEFAULT" == "$account" ]]; then
+    if [[ -n "$selected_replacement" ]]; then
+      set_default "$selected_replacement"
+    else
+      clear_default
+    fi
     removed_marker=1
   fi
 
   ui_ok "Removed saved auth for '$account' at $dir/auth.json"
-  if [[ "$removed_marker" -eq 1 ]]; then
+  if [[ -n "$selected_replacement" ]]; then
+    ui_note "Switched current/default pointers from '$account' to '$selected_replacement' before forget."
+  elif [[ "$removed_marker" -eq 1 ]]; then
     ui_note "Cleared current/default pointers for '$account'."
   fi
 }
